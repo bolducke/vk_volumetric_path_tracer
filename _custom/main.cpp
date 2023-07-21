@@ -1,6 +1,7 @@
 // Copyright 2020-2021 NVIDIA Corporation
 // SPDX-License-Identifier: Apache-2.0
 #include <array>
+#include <iostream>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 #define TINYOBJLOADER_IMPLEMENTATION
@@ -14,6 +15,8 @@
 #include <nvvk/resourceallocator_vk.hpp>  // For NVVK memory allocators
 #include <nvvk/shaders_vk.hpp>            // For nvvk::createShaderModule
 #include <nvvk/structs_vk.hpp>            // For nvvk::make
+
+#include "npy.hpp"
 
 static const uint64_t render_width     = 800;
 static const uint64_t render_height    = 600;
@@ -93,7 +96,7 @@ int main(int argc, const char** argv)
   std::vector<std::string> searchPaths = {exePath + PROJECT_RELDIRECTORY, exePath + PROJECT_RELDIRECTORY "..",
                                           exePath + PROJECT_RELDIRECTORY "../..", exePath + PROJECT_NAME};
   tinyobj::ObjReader       reader;  // Used to read an OBJ file
-  reader.ParseFromFile(nvh::findFile("scenes/CornellBox-Original-Merged.obj", searchPaths));
+  reader.ParseFromFile(nvh::findFile("_scenes/cornelbox.obj", searchPaths));
   assert(reader.Valid());  // Make sure tinyobj was able to parse this file
   const std::vector<tinyobj::real_t>   objVertices = reader.GetAttrib().GetVertices();
   const std::vector<tinyobj::shape_t>& objShapes   = reader.GetShapes();  // All shapes in the file
@@ -102,10 +105,21 @@ int main(int argc, const char** argv)
   // Get the indices of the vertices of the first mesh of `objShape` in `attrib.vertices`:
   std::vector<uint32_t> objIndices;
   objIndices.reserve(objShape.mesh.indices.size());
+  uint32_t nF = static_cast<uint32_t>(objShape.mesh.indices.size()/3.0);
   for(const tinyobj::index_t& index : objShape.mesh.indices)
   {
     objIndices.push_back(index.vertex_index);
   }
+
+  // Object Material
+  std::vector<unsigned long> shape {};
+  bool fortran_order;
+  std::vector<uint32_t> objMaterials;
+  
+  const std::string path = nvh::findFile("_scenes/materials.npy", searchPaths);
+  npy::LoadArrayFromNumpy(path, shape, fortran_order, objMaterials);
+  assert(objMaterials.size() == nF);                       
+
 
   // Create the command pool
   VkCommandPoolCreateInfo cmdPoolInfo = nvvk::make<VkCommandPoolCreateInfo>();
@@ -114,7 +128,7 @@ int main(int argc, const char** argv)
   NVVK_CHECK(vkCreateCommandPool(context, &cmdPoolInfo, nullptr, &cmdPool));
 
   // Upload the vertex and index buffers to the GPU.
-  nvvk::Buffer vertexBuffer, indexBuffer;
+  nvvk::Buffer vertexBuffer, indexBuffer, materialBuffer;
   {
     // Start a command buffer for uploading the buffers
     VkCommandBuffer uploadCmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
@@ -123,6 +137,7 @@ int main(int argc, const char** argv)
                                      | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     vertexBuffer = allocator.createBuffer(uploadCmdBuffer, objVertices, usage);
     indexBuffer  = allocator.createBuffer(uploadCmdBuffer, objIndices, usage);
+    materialBuffer  = allocator.createBuffer(uploadCmdBuffer, objMaterials, usage);
 
     EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
     allocator.finalizeAndReleaseStaging();
@@ -153,7 +168,7 @@ int main(int argc, const char** argv)
     // Create offset info that allows us to say how many triangles and vertices to read
     VkAccelerationStructureBuildRangeInfoKHR offsetInfo;
     offsetInfo.firstVertex     = 0;
-    offsetInfo.primitiveCount  = static_cast<uint32_t>(objIndices.size() / 3);  // Number of triangles
+    offsetInfo.primitiveCount  = nF;  // Number of triangles
     offsetInfo.primitiveOffset = 0;
     offsetInfo.transformOffset = 0;
     blas.asBuildOffsetInfo.push_back(offsetInfo);
@@ -188,6 +203,7 @@ int main(int argc, const char** argv)
   descriptorSetContainer.addBinding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
   descriptorSetContainer.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
   descriptorSetContainer.addBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 
   // Create a layout from the list of bindings
   descriptorSetContainer.initLayout();
@@ -197,7 +213,7 @@ int main(int argc, const char** argv)
   descriptorSetContainer.initPipeLayout();
 
   // Write values into the descriptor set.
-  std::array<VkWriteDescriptorSet, 4> writeDescriptorSets;
+  std::array<VkWriteDescriptorSet, 5> writeDescriptorSets;
   // 0
   VkDescriptorBufferInfo descriptorBufferInfo{};
   descriptorBufferInfo.buffer = buffer.buffer;    // The VkBuffer object
@@ -219,6 +235,11 @@ int main(int argc, const char** argv)
   indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
   indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
   writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, 3, &indexDescriptorBufferInfo);
+  // 3
+  VkDescriptorBufferInfo materialDescriptorBufferInfo{};
+  materialDescriptorBufferInfo.buffer = materialBuffer.buffer;
+  materialDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
+  writeDescriptorSets[4]           = descriptorSetContainer.makeWrite(0, 4, &materialDescriptorBufferInfo);
   vkUpdateDescriptorSets(context,                                            // The context
                         static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
                         writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
@@ -289,6 +310,7 @@ int main(int argc, const char** argv)
   raytracingBuilder.destroy();
   allocator.destroy(vertexBuffer);
   allocator.destroy(indexBuffer);
+  allocator.destroy(materialBuffer);
   vkDestroyCommandPool(context, cmdPool, nullptr);
   allocator.destroy(buffer);
   allocator.deinit();

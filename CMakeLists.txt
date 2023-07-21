@@ -57,3 +57,6 @@ add_subdirectory(checkpoints/e10_materials)
 add_subdirectory(checkpoints/e11_rt_pipeline_1)
 add_subdirectory(checkpoints/e11_rt_pipeline_2)
 add_subdirectory(checkpoints/e11_rt_pipeline_3)
+
+# Personal
+add_subdirectory(_custom) # Empty starting project

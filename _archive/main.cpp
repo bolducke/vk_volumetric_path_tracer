@@ -1,6 +1,8 @@
 // Copyright 2020-2021 NVIDIA Corporation
 // SPDX-License-Identifier: Apache-2.0
 #include <array>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 #define TINYOBJLOADER_IMPLEMENTATION
@@ -14,6 +16,8 @@
 #include <nvvk/resourceallocator_vk.hpp>  // For NVVK memory allocators
 #include <nvvk/shaders_vk.hpp>            // For nvvk::createShaderModule
 #include <nvvk/structs_vk.hpp>            // For nvvk::make
+
+#include <iostream>
 
 static const uint64_t render_width     = 800;
 static const uint64_t render_height    = 600;
@@ -85,8 +89,8 @@ int main(int argc, const char** argv)
   // is handled automatically, with potentially slower reads/writes.
   nvvk::Buffer buffer = allocator.createBuffer(bufferCreateInfo,                         //
                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT       //
-                                                   | VK_MEMORY_PROPERTY_HOST_CACHED_BIT  //
-                                                   | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                                             | VK_MEMORY_PROPERTY_HOST_CACHED_BIT  //
+                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
   // Load the mesh of the first shape from an OBJ file
   const std::string        exePath(argv[0], std::string(argv[0]).find_last_of("/\\") + 1);
@@ -113,6 +117,37 @@ int main(int argc, const char** argv)
   VkCommandPool cmdPool;
   NVVK_CHECK(vkCreateCommandPool(context, &cmdPoolInfo, nullptr, &cmdPool));
 
+  //CUSTOM: LOAD THE IMAGE
+  nvvk::Buffer envmapBuffer;
+  {
+    int width, height, nrChannels;
+    const uint8_t *datatmp = stbi_load( nvh::findFile("_custom/envmap.jpg", searchPaths).c_str() , &width, &height, &nrChannels, 3);
+
+    std::cout << width * height * nrChannels * sizeof(uint8_t) << std::endl;
+
+
+    float *data;
+    for (int i = 0; i < width * height * nrChannels * sizeof(uint8_t); i++ ){
+      data[i] = (float)datatmp[i];
+    }
+
+    VkDeviceSize bufferSizeBytes  = width * height * nrChannels * sizeof(float);
+
+    // Start a command buffer for uploading the buffers
+    VkCommandBuffer uploadCmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
+      
+    envmapBuffer = allocator.createBuffer(uploadCmdBuffer, bufferSizeBytes, data, 
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT 
+                                            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+
+                                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                            | VK_MEMORY_PROPERTY_HOST_CACHED_BIT 
+                                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
+    allocator.finalizeAndReleaseStaging();
+  }
+
   // Upload the vertex and index buffers to the GPU.
   nvvk::Buffer vertexBuffer, indexBuffer;
   {
@@ -120,7 +155,7 @@ int main(int argc, const char** argv)
     VkCommandBuffer uploadCmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
     // We get these buffers' device addresses, and use them as storage buffers and build inputs.
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+                                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     vertexBuffer = allocator.createBuffer(uploadCmdBuffer, objVertices, usage);
     indexBuffer  = allocator.createBuffer(uploadCmdBuffer, objIndices, usage);
 
@@ -188,6 +223,7 @@ int main(int argc, const char** argv)
   descriptorSetContainer.addBinding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
   descriptorSetContainer.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
   descriptorSetContainer.addBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
 
   // Create a layout from the list of bindings
   descriptorSetContainer.initLayout();
@@ -197,7 +233,7 @@ int main(int argc, const char** argv)
   descriptorSetContainer.initPipeLayout();
 
   // Write values into the descriptor set.
-  std::array<VkWriteDescriptorSet, 4> writeDescriptorSets;
+  std::array<VkWriteDescriptorSet, 5> writeDescriptorSets;
   // 0
   VkDescriptorBufferInfo descriptorBufferInfo{};
   descriptorBufferInfo.buffer = buffer.buffer;    // The VkBuffer object
@@ -219,6 +255,13 @@ int main(int argc, const char** argv)
   indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
   indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
   writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, 3, &indexDescriptorBufferInfo);
+  // 4
+  VkDescriptorBufferInfo envmapDescriptorBufferInfo{};
+  indexDescriptorBufferInfo.buffer = envmapBuffer.buffer;
+  indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
+  writeDescriptorSets[4]           = descriptorSetContainer.makeWrite(0, 4, &envmapDescriptorBufferInfo);
+
+  std::cout << buffer.buffer << " " << vertexBuffer.buffer << " " << indexBuffer.buffer << " " << envmapBuffer.buffer;
   vkUpdateDescriptorSets(context,                                            // The context
                         static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
                         writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
@@ -287,6 +330,7 @@ int main(int argc, const char** argv)
   vkDestroyShaderModule(context, rayTraceModule, nullptr);
   descriptorSetContainer.deinit();
   raytracingBuilder.destroy();
+  allocator.destroy(envmapBuffer);
   allocator.destroy(vertexBuffer);
   allocator.destroy(indexBuffer);
   vkDestroyCommandPool(context, cmdPool, nullptr);
