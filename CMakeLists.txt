@@ -59,4 +59,4 @@ add_subdirectory(checkpoints/e11_rt_pipeline_2)
 add_subdirectory(checkpoints/e11_rt_pipeline_3)
 
 # Personal
-add_subdirectory(_custom) # Empty starting project
+add_subdirectory(experiments/_spectral_volumetric_ray_tracing) # Empty starting project
